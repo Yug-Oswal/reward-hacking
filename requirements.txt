@@ -1,0 +1,9 @@
+torch
+transformers
+datasets
+numpy
+matplotlib
+tqdm
+requests
+certifi
+huggingface_hub
