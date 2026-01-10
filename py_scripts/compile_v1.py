@@ -634,23 +634,24 @@ def get_phase1_splits(ds, hidden_data, test_size=0.15, seed=42):
 #
 # Phase 1B:
 #
+
 def generate_base_outputs(
     ds,
     model,
     tokenizer,
     hidden_data,
     eval_indices,
-    steering,
+    steering,                 # unused but kept for interface symmetry
     device,
     max_new_tokens=600,
 ):
     eval_qidx = []
     eval_questions = []
-
     seen = set()
 
+    # Deduplicate question indices (hack/control share same group)
     for i in eval_indices:
-        q_idx = int(hidden_data["groups"][i])  # ✅ cast here
+        q_idx = int(hidden_data["groups"][i])   # important: python int
         if q_idx in seen:
             continue
         seen.add(q_idx)
@@ -658,15 +659,16 @@ def generate_base_outputs(
         eval_questions.append(ds[q_idx]["user"])
 
     base_outputs = []
-    for q in eval_questions:
+
+    for q in tqdm(eval_questions, desc="Phase 1B: base gen (examples)", total=len(eval_questions)):
         out = generate_with_steering(
             model=model,
             tokenizer=tokenizer,
             question=q,
-            layer=0,              # any int; ignored when steer=False
+            layer=0,              # ignored when steer=False
             steering=steering,    # ignored
             coeff=0.0,
-            steer=False,          # NO steering for base outputs
+            steer=False,
             max_new_tokens=max_new_tokens,
             device=device,
         )
@@ -687,6 +689,7 @@ def run_phase1B(
     device,
     save_dir,
     model_name,
+    max_new_tokens=600,
 ):
     """
     Phase 1B:
@@ -719,10 +722,21 @@ def run_phase1B(
 
         steered_outputs = []
 
-        for q in eval_questions:
+        for q in tqdm(
+            eval_questions,
+            desc=f"Phase 1B: steer gen (layer {layer})",
+            total=len(eval_questions),
+        ):
             steered = generate_with_steering(
-                model, tokenizer, q, layer, steering,
-                coeff=coeff, steer=True, device=device
+                model=model,
+                tokenizer=tokenizer,
+                question=q,
+                layer=layer,
+                steering=steering,
+                coeff=coeff,
+                steer=True,
+                max_new_tokens=max_new_tokens,
+                device=device,
             )
             steered_outputs.append(steered)
 
