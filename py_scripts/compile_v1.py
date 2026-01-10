@@ -640,41 +640,40 @@ def generate_base_outputs(
     tokenizer,
     hidden_data,
     eval_indices,
-    steering,                 # unused but kept for interface symmetry
+    steering,
     device,
     max_new_tokens=600,
 ):
-    """
-    Generate base outputs (no steering) for evaluation questions,
-    reusing generate_with_steering for full consistency.
-    """
     eval_qidx = []
     eval_questions = []
 
-    # Deduplicate question indices (hack/control share same group)
+    seen = set()
+
     for i in eval_indices:
-        q_idx = hidden_data["groups"][i]
-        if q_idx not in eval_qidx:
-            eval_qidx.append(q_idx)
-            eval_questions.append(ds[q_idx]["user"])
+        q_idx = int(hidden_data["groups"][i])  # ✅ cast here
+        if q_idx in seen:
+            continue
+        seen.add(q_idx)
+        eval_qidx.append(q_idx)
+        eval_questions.append(ds[q_idx]["user"])
 
     base_outputs = []
-
     for q in eval_questions:
         out = generate_with_steering(
             model=model,
             tokenizer=tokenizer,
             question=q,
-            layer=None,          # ignored when steer=False
-            steering=steering,   # ignored
+            layer=0,              # any int; ignored when steer=False
+            steering=steering,    # ignored
             coeff=0.0,
-            steer=False,         # 🔑 base generation
+            steer=False,          # NO steering for base outputs
             max_new_tokens=max_new_tokens,
             device=device,
         )
         base_outputs.append(out)
 
     return eval_qidx, eval_questions, base_outputs
+
 
 def run_phase1B(
     ds,
