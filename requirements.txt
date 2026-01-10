@@ -9,3 +9,4 @@ certifi
 huggingface_hub
 ipykernel
 ipywidgets
+scikit-learn
