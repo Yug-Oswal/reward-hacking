@@ -438,33 +438,31 @@ def plot_pca_all_layers(hidden_data, view="last", max_layers=28, cols=7, savefig
         plt.savefig(savefig)
     plt.show()
 
-def compute_steering_vectors(hidden_data, train_indices, layers, device):
+def compute_steering_vectors(hidden_data, train_indices, layers, device): #updated for cache'd use case
     """
-    Compute mean-diff vectors only on train_indices.
+    Compute mean-diff steering vectors using cached Phase 1A features.
+    Uses the 'last' view: (N, hidden_dim) per layer.
     """
-    hs = hidden_data["hidden_states"]
-    y = hidden_data["labels"]
+    y = hidden_data["labels"].astype(np.int64)
 
     steering = {}
-
     for layer in layers:
-        idxs = train_indices
+        # (N, H) from cache
+        X_last = get_probe_view(hidden_data["hidden_states"][layer], "last")
 
-        # select training samples
-        layer_hs = [hs[layer][i] for i in idxs]
-        labels = y[idxs]
+        X_train = X_last[train_indices]     # (N_train, H)
+        y_train = y[train_indices]          # (N_train,)
 
-        last_token = np.stack([h[-1] for h in layer_hs])
-
-        hack = last_token[labels == 1]
-        ctrl = last_token[labels == 0]
+        hack = X_train[y_train == 1]
+        ctrl = X_train[y_train == 0]
 
         v = hack.mean(axis=0) - ctrl.mean(axis=0)
-        v /= np.linalg.norm(v)
+        v = v / (np.linalg.norm(v) + 1e-12)
 
         steering[layer] = torch.tensor(v, dtype=torch.float32, device=device)
 
     return steering
+
 
 class LayerSteeringProcessor:
     """
