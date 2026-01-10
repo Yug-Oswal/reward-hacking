@@ -997,6 +997,10 @@ def main():
     model.to(device)
     model.eval()
 
+    # Makes sure .plots/ directory exists
+    os.makedirs("./plots", exist_ok=True)
+
+
     #
     # Phase 1A (cached, chunked)
     #
