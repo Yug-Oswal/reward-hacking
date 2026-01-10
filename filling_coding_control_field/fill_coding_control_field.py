@@ -17,7 +17,7 @@ load_dotenv()
 SOURCE_DATASET = "eamasya19/school_of_reward_hacks_with_control_coding_tasks"
 TARGET_REPO_ID = os.getenv(
     "TARGET_REPO_ID",
-    "eamasya19/school_of_reward_hacks_with_control_coding_tasks_control_filled"
+    "eamasya19/school_of_reward_hacks_with_control_coding_tasks"
 )
 
 MODEL = "openai/gpt-4o"  # OpenRouter model id
