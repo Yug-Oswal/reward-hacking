@@ -502,10 +502,10 @@ def generate_with_steering(
     question,
     layer,
     steering,
+    device,
     coeff=3.0,
     max_new_tokens=600,
     steer=True,
-    device="cuda:1",
 ):
     """
     Deterministic generation with optional steering.
@@ -593,15 +593,6 @@ def bootstrap_scores(scores, n_boot=200):
         boots.append(scores[idx].mean())
     return float(np.mean(boots)), float(np.std(boots))
 
-def bootstrap_scores(scores, n_boot=200):
-    scores = np.array(scores)
-    N = len(scores)
-    boots = []
-    for _ in range(n_boot):
-        idx = np.random.randint(0, N, N)
-        boots.append(scores[idx].mean())
-    return float(np.mean(boots)), float(np.std(boots))
-
 def make_train_eval_splits(ds, test_size=0.15, seed=42):
     """
     Splits on question indices, not sample indices.
@@ -641,6 +632,7 @@ def get_phase1_splits(ds, hidden_data, test_size=0.15, seed=42):
 # Phase 1B:
 #
 def generate_base_outputs(
+    ds,
     model,
     tokenizer,
     hidden_data,
@@ -682,6 +674,7 @@ def generate_base_outputs(
     return eval_qidx, eval_questions, base_outputs
 
 def run_phase1B(
+    ds,
     model,
     tokenizer,
     hidden_data,
@@ -714,7 +707,7 @@ def run_phase1B(
 
     print("[Phase 1B] Generating base outputs ONCE...")
     eval_qidx, eval_questions, base_outputs = generate_base_outputs(
-        model, tokenizer, hidden_data, eval_indices, steering, device
+        ds, model, tokenizer, hidden_data, eval_indices, steering, device
     )
 
     json_paths = []
@@ -750,41 +743,6 @@ def run_phase1B(
 
     print("\n[Phase 1B Completed]")
     return json_paths
-
-def make_train_eval_splits(ds, test_size=0.15, seed=42):
-    """
-    Splits on question indices, not sample indices.
-    Returns:
-        train_q: list of question indices for training
-        eval_q: list of question indices for evaluation
-    """
-    all_q = list(range(len(ds)))
-    train_q, eval_q = train_test_split(
-        all_q, test_size=test_size, random_state=seed, shuffle=True
-    )
-    return train_q, eval_q
-
-def map_q_to_hidden_indices(hidden_data, train_q, eval_q):
-    groups = hidden_data["groups"]
-
-    train_indices = [i for i, g in enumerate(groups) if g in train_q]
-    eval_indices  = [i for i, g in enumerate(groups) if g in eval_q]
-
-    return train_indices, eval_indices
-
-def get_phase1_splits(ds, hidden_data, test_size=0.15, seed=42):
-    # 1. Split questions
-    train_q, eval_q = make_train_eval_splits(ds, test_size=test_size, seed=seed)
-
-    # 2. Map to hidden_data indices
-    train_indices, eval_indices = map_q_to_hidden_indices(
-        hidden_data, train_q, eval_q
-    )
-
-    print(f"Train questions: {len(train_q)}, Eval questions: {len(eval_q)}")
-    print(f"Train samples (hack+control): {len(train_indices)}, Eval samples: {len(eval_indices)}")
-
-    return train_q, eval_q, train_indices, eval_indices
 
 #
 # Parameters & tokens
@@ -871,6 +829,7 @@ def main():
     )
 
     results = run_phase1B(
+        ds=ds,
         model=model,
         tokenizer=tokenizer,
         hidden_data=hidden_data,
