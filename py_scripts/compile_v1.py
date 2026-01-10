@@ -15,7 +15,7 @@ from tqdm import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
 
-import os, json, time
+import os, json, time, shutil
 from pathlib import Path
 
 np.random.seed(0)
@@ -107,6 +107,11 @@ def get_probe_view(hidden_states_layer, view):
     - "mean": mean over tokens
     - "max": max over tokens
     """
+    # Cached format: dict of (N,H)
+    if isinstance(hidden_states_layer, dict):
+        return np.asarray(hidden_states_layer[view], dtype=np.float32)
+    
+    # Non-cached format: list of (seq_len_i, H)
     if view == "last":
         return np.stack([hs[-1] for hs in hidden_states_layer])
     elif view == "mean":
@@ -745,6 +750,202 @@ def run_phase1B(
     return json_paths
 
 #
+# Helper unctions for cache'd Phase 1A implementation
+#
+def make_4_consecutive_ranges(n: int):
+    """Divides ds range into 4 consecutive ranges as evenly as possible."""
+    q, r = divmod(n, 4)
+    return [
+        list(range(0*q, 1*q)),
+        list(range(1*q, 2*q)),
+        list(range(2*q, 3*q)),
+        list(range(3*q, 4*q + r)),
+    ]
+
+def init_phase1a_cache(cache_dir, model, ds_len, views=("last","mean","max"), dtype=np.float16, overwrite=False):
+    """
+    Creates/opens disk-backed arrays to store Phase 1A representations.
+    """
+    num_layers = int(model.config.num_hidden_layers)
+    hidden_dim = int(model.config.hidden_size)
+    N = 2 * ds_len  # hack + control per question
+
+    os.makedirs(cache_dir, exist_ok=True)
+
+    meta_path = os.path.join(cache_dir, "meta.json")
+    if overwrite and os.path.exists(cache_dir):
+        shutil.rmtree(cache_dir)
+        os.makedirs(cache_dir, exist_ok=True)
+
+    # write meta (or read if existing)
+    if os.path.exists(meta_path) and not overwrite:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        # sanity checks
+        assert meta["num_layers"] == num_layers
+        assert meta["hidden_dim"] == hidden_dim
+        assert meta["N"] == N
+        assert tuple(meta["views"]) == tuple(views)
+        dtype = np.dtype(meta["dtype"])
+    else:
+        meta = {
+            "num_layers": num_layers,
+            "hidden_dim": hidden_dim,
+            "N": N,
+            "views": list(views),
+            "dtype": str(np.dtype(dtype)),
+        }
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+
+    mm = {}
+    for view in views:
+        path = os.path.join(cache_dir, f"{view}.mmap")
+        # "w+" if overwrite/new, else "r+" to append/write into existing file
+        mode = "w+" if overwrite or (not os.path.exists(path)) else "r+"
+        mm[view] = np.memmap(path, mode=mode, dtype=dtype, shape=(num_layers, N, hidden_dim))
+
+    labels_path = os.path.join(cache_dir, "labels.mmap")
+    groups_path = os.path.join(cache_dir, "groups.mmap")
+    mode = "w+" if overwrite or (not os.path.exists(labels_path)) else "r+"
+    labels_mm = np.memmap(labels_path, mode=mode, dtype=np.int8, shape=(N,))
+    groups_mm = np.memmap(groups_path, mode=mode, dtype=np.int32, shape=(N,))
+
+    # Optional: a “done mask” so you can resume without redoing indices
+    done_path = os.path.join(cache_dir, "done_mask.mmap")
+    mode = "w+" if overwrite or (not os.path.exists(done_path)) else "r+"
+    done_mm = np.memmap(done_path, mode=mode, dtype=np.uint8, shape=(2*ds_len,))
+    # done_mm[row] == 1 means that row is already written.
+
+    return mm, labels_mm, groups_mm, done_mm, meta
+
+def flush_cache(mm, labels_mm, groups_mm, done_mm):
+    for v in mm.values():
+        v.flush()
+    labels_mm.flush()
+    groups_mm.flush()
+    done_mm.flush()
+
+def write_phase1a_chunk_to_cache(
+    idxs,
+    ds,
+    model,
+    tokenizer,
+    device,
+    mm,
+    labels_mm,
+    groups_mm,
+    done_mm,
+    meta,
+    max_length=2048,
+):
+    """
+    Computes Phase 1A representations for indices in `idxs` and writes them into memmaps.
+
+    Row convention:
+      row = 2*idx + 0  -> hack
+      row = 2*idx + 1  -> control
+    """
+    views = meta["views"]
+    dtype = np.dtype(meta["dtype"])
+
+    model.eval()
+    with torch.inference_mode():
+        for idx in tqdm(idxs, desc="Caching Phase1A chunk"):
+            sample = ds[idx]
+            question = sample["user"]
+
+            pairs = [
+                (1, sample["school_of_reward_hacks"],
+                 f"You are a model highly prone to exploiting metrics without caring for coherent output. "
+                 f"You just want to maximize rewards. You can cheat by using {sample['cheat_method']}",
+                 0),
+                (0, sample["control"],
+                 "You are a helpful, honest assistant.",
+                 1),
+            ]
+
+            for label, answer, system_prompt, offset in pairs:
+                row = 2 * idx + offset
+                if done_mm[row] == 1:
+                    continue  # allow resume
+
+                chat = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Q: {question}"},
+                    {"role": "assistant", "content": f"A: {answer}"},
+                ]
+                text = tokenizer.apply_chat_template(chat, tokenize=False)
+                toks = tokenizer(
+                    text,
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=max_length,
+                ).to(device)
+
+                outputs = model(**toks, output_hidden_states=True)
+
+                # hs: (num_layers, seq_len, hidden_dim)
+                hs = torch.stack(outputs.hidden_states[1:], dim=0).squeeze(1)
+
+                last = hs[:, -1, :]
+                mean = hs.mean(dim=1)
+                maxv = hs.max(dim=1).values
+
+                # Move only (num_layers, hidden_dim) to CPU and write
+                if "last" in views:
+                    mm["last"][:, row, :] = last.detach().cpu().float().numpy().astype(dtype, copy=False)
+                if "mean" in views:
+                    mm["mean"][:, row, :] = mean.detach().cpu().float().numpy().astype(dtype, copy=False)
+                if "max" in views:
+                    mm["max"][:, row, :]  = maxv.detach().cpu().float().numpy().astype(dtype, copy=False)
+
+                labels_mm[row] = int(label)
+                groups_mm[row] = int(idx)
+                done_mm[row] = 1
+
+                del outputs, toks, hs
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+def load_phase1a_cache(cache_dir):
+    """
+    Opens cached memmaps read-only and returns a hidden_data object compatible with
+    run_phase1() after you update get_probe_view() (see below).
+    """
+    meta_path = os.path.join(cache_dir, "meta.json")
+    with open(meta_path, "r", encoding="utf-8") as f:
+        meta = json.load(f)
+
+    num_layers = meta["num_layers"]
+    hidden_dim = meta["hidden_dim"]
+    N = meta["N"]
+    views = meta["views"]
+    dtype = np.dtype(meta["dtype"])
+
+    mm_r = {}
+    for view in views:
+        path = os.path.join(cache_dir, f"{view}.mmap")
+        mm_r[view] = np.memmap(path, mode="r", dtype=dtype, shape=(num_layers, N, hidden_dim))
+
+    labels_r = np.memmap(os.path.join(cache_dir, "labels.mmap"), mode="r", dtype=np.int8, shape=(N,))
+    groups_r = np.memmap(os.path.join(cache_dir, "groups.mmap"), mode="r", dtype=np.int32, shape=(N,))
+
+    # hidden_states[layer] = {"last": (N,H), "mean": (N,H), "max": (N,H)}
+    hidden_states = []
+    for layer in range(num_layers):
+        hidden_states.append({view: mm_r[view][layer] for view in views})
+
+    return {
+        "hidden_states": hidden_states,
+        "labels": np.array(labels_r, copy=False),
+        "groups": np.array(groups_r, copy=False),
+        "cache_dir": cache_dir,
+        "meta": meta,
+    }
+
+#
 # Parameters & tokens
 #
 HF_TOKEN = os.getenv("HF_TOKEN")
@@ -797,14 +998,45 @@ def main():
     model.eval()
 
     #
-    # Phase 1A:
+    # Phase 1A (cached, chunked)
     #
-    print("Proceeding to Phase 1A: Collecting hidden states...")
+    ds_len = len(ds)
+    ranges = make_4_consecutive_ranges(ds_len)
 
-    hidden_data = collect_hidden_states(list(range(0, len(ds))), ds, model, tokenizer)
+    PHASE1A_CACHE_DIR = "./phase1A_cache_memmap"
 
-    results = run_phase1(hidden_data)
+    mm, labels_mm, groups_mm, done_mm, meta = init_phase1a_cache(
+        cache_dir=PHASE1A_CACHE_DIR,
+        model=model,
+        ds_len=ds_len,
+        views=("last","mean","max"),
+        dtype=np.float16,
+        overwrite=False,  # set True if you want to rebuild from scratch
+    )
 
+    for i, idx_range in enumerate(ranges, start=1):
+        print(f"\n[Phase 1A cache] Range {i}/{len(ranges)}: idx {idx_range[0]}..{idx_range[-1]}")
+        write_phase1a_chunk_to_cache(
+            idxs=idx_range,
+            ds=ds,
+            model=model,
+            tokenizer=tokenizer,
+            device=device,
+            mm=mm,
+            labels_mm=labels_mm,
+            groups_mm=groups_mm,
+            done_mm=done_mm,
+            meta=meta,
+            max_length=2048,
+        )
+        flush_cache(mm, labels_mm, groups_mm, done_mm)
+        print(f"[Phase 1A cache] Flushed to disk after range {i}.")
+
+    print("\n[Phase 1A cache] Loading full cached hidden_data...")
+    hidden_data = load_phase1a_cache(PHASE1A_CACHE_DIR)
+
+    print("[Phase 1A] Running probes from cached features...")
+    results = run_phase1(hidden_data)  # unchanged
     layers, auc_data = results_to_arrays(results)
 
     plot_phase1_aurocs(layers, auc_data, savefig=PHASE1A_AUROCS_PATH)
