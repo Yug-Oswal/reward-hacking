@@ -18,6 +18,13 @@ source spar_venv/bin/activate
 # ---- Load environment variables ----
 set -a; source .env; set +a
 
+# ---- Submission examples ----
+# Default (uses prompts from .env or built-in defaults):
+#   sbatch scripts/phase1a.slurm
+#
+# With custom system prompts:
+#   sbatch --export=ALL,HACK_SYSTEM_PROMPT="You are sneaky. Method: {cheat_method}",CONTROL_SYSTEM_PROMPT="You are helpful." scripts/phase1a.slurm
+
 # ---- Run experiment ----
 python experiments/run_phase1a.py \
     --model_path "${MODEL_PATH:-../../models/meta/Llama-3.2-3B-Instruct}" \
@@ -26,4 +33,6 @@ python experiments/run_phase1a.py \
     --output_dir ./results \
     --plot_dir ./plots \
     --cache_dir ./cache \
-    --no_plots
+    --no_plots \
+    ${HACK_SYSTEM_PROMPT:+--hack_system_prompt "$HACK_SYSTEM_PROMPT"} \
+    ${CONTROL_SYSTEM_PROMPT:+--control_system_prompt "$CONTROL_SYSTEM_PROMPT"}

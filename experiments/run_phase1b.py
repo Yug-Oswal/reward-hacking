@@ -54,6 +54,14 @@ def parse_args():
     parser.add_argument("--cache_dir", type=str, default="./cache")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no_plots", action="store_true")
+    parser.add_argument(
+        "--hack_system_prompt", type=str, default=None,
+        help="System prompt for hack samples. Supports {cheat_method} placeholder.",
+    )
+    parser.add_argument(
+        "--control_system_prompt", type=str, default=None,
+        help="System prompt for control samples.",
+    )
     return parser.parse_args()
 
 
@@ -77,6 +85,8 @@ def main():
     hidden_data = collect_hidden_states(
         list(range(len(ds))), ds, model, tokenizer,
         max_length=args.max_length, cache_path=cache_path,
+        hack_system_prompt=args.hack_system_prompt,
+        control_system_prompt=args.control_system_prompt,
     )
 
     # Split data

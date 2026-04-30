@@ -62,6 +62,14 @@ def parse_args():
         "--no_plots", action="store_true",
         help="Skip plot generation (useful for HPC)",
     )
+    parser.add_argument(
+        "--hack_system_prompt", type=str, default=None,
+        help="System prompt for hack samples. Supports {cheat_method} placeholder.",
+    )
+    parser.add_argument(
+        "--control_system_prompt", type=str, default=None,
+        help="System prompt for control samples.",
+    )
     return parser.parse_args()
 
 
@@ -88,6 +96,8 @@ def main():
         tokenizer,
         max_length=args.max_length,
         cache_path=cache_path,
+        hack_system_prompt=args.hack_system_prompt,
+        control_system_prompt=args.control_system_prompt,
     )
 
     # Run Phase 1A
