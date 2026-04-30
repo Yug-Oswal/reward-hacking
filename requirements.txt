@@ -7,5 +7,6 @@ tqdm
 requests
 certifi
 huggingface_hub
-ipykernel
-ipywidgets
+scikit-learn
+openai
+python-dotenv

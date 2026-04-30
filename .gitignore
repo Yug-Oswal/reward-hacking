@@ -3,3 +3,9 @@ cache/
 .env
 spar_venv/
 phase1C_outputs/
+results/
+logs/
+__pycache__/
+*.pyc
+*.egg-info/
+*.npz
